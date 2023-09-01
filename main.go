@@ -10,8 +10,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 const (
@@ -42,6 +45,8 @@ var (
 			div:  10,
 		},
 	}
+	cachePath    = filepath.Join(os.Getenv("HOME"), ".cache", "currency", "cache")
+	cacheStorage *bolt.DB
 )
 
 type currencyInfo struct {
@@ -74,15 +79,22 @@ func (cr currencyData) getRow() []string {
 	}
 }
 
-func getCurrencyItem(name string) (r currencyData, err error) {
+func getCurrencyItem(name string, t time.Time) (r currencyData, err error) {
 	info, ok := currenciesInfo[name]
 	if !ok {
 		err = fmt.Errorf("invalid currency name: %s", name)
 		return
 	}
 
-	var url = fmt.Sprintf(urlTemplate, info.code, time.Now().Unix())
-	res, err := httpClient.Get(url)
+	var url = fmt.Sprintf(urlTemplate, info.code, t.Unix())
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
+
+	res, err := httpClient.Do(req)
 	if err != nil {
 		return r, err
 	}
@@ -114,18 +126,90 @@ func getCurrencyItem(name string) (r currencyData, err error) {
 	return d, nil
 }
 
+func getCurrencyItemCache(name string, t time.Time, skipCache bool) (r currencyData, err error) {
+	var cacheKey = fmt.Sprintf("%s-%s", t.Format(outputDateFormat), name)
+	var val []byte
+	var tx *bolt.Tx
+
+	tx, err = cacheStorage.Begin(true)
+	if err != nil {
+		return
+	}
+
+	defer tx.Rollback()
+
+	var b *bolt.Bucket
+	b, err = tx.CreateBucketIfNotExists([]byte("cache"))
+	if err != nil {
+		return
+	}
+
+	if skipCache {
+		goto skipCache
+	}
+
+	val = b.Get([]byte(cacheKey))
+	if val == nil {
+		goto skipCache
+	}
+
+	err = json.Unmarshal(val, &r)
+	if err != nil {
+		return
+	}
+
+	return
+
+skipCache:
+	// <-time.After(5 * time.Second)
+	r, err = getCurrencyItem(name, t)
+	if err != nil {
+		return
+	}
+
+	val, err = json.Marshal(r)
+	if err != nil {
+		return
+	}
+
+	err = b.Put([]byte(cacheKey), val)
+	if err != nil {
+		return
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return
+	}
+
+	return
+}
+
 func main() {
 	var (
-		currencies = flag.String("currencies", usdCurrency, "currency codes (comma separated)")
-		usd        = flag.Bool(usdCurrency, false, "show usd info")
-		eur        = flag.Bool(eurCurrency, false, "show eur info")
-		uah        = flag.Bool(uahCurrency, false, "show uah info")
-		rows       [][]string
-		err        error
+		currency  = flag.String("currency", usdCurrency, "currency code")
+		skipCache = flag.Bool("skip-cache", false, "skip cache")
+		usd       = flag.Bool(usdCurrency, false, "show usd info")
+		eur       = flag.Bool(eurCurrency, false, "show eur info")
+		uah       = flag.Bool(uahCurrency, false, "show uah info")
+		rows      [][]string
+		err       error
 	)
 	flag.Parse()
 
-	currenciesList := strings.Split(*currencies, ",")
+	err = os.MkdirAll(filepath.Dir(cachePath), 0777)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	cacheStorage, err = bolt.Open(cachePath, 0600, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer cacheStorage.Close()
+
+	currenciesList := strings.Split(*currency, ",")
 	if *usd {
 		currenciesList = append(currenciesList, usdCurrency)
 	}
@@ -143,7 +227,7 @@ func main() {
 	}
 
 	for _, currency := range currenciesList {
-		r, err := getCurrencyItem(currency)
+		r, err := getCurrencyItemCache(currency, time.Now(), *skipCache)
 		if err != nil {
 			log.Fatal(err)
 		}
