@@ -1,0 +1,37 @@
+# This workflow will build a golang project
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
+
+name: Go
+
+on:
+  push:
+    branches: [ "*" ]
+    tags: [ '*' ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.21
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v4.4.0
+        with:
+          version: latest
+          args: release --clean --skip-validate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GOPATH: /home/runner/go
